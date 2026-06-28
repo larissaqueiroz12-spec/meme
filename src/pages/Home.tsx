@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import { Heart, MessageCircle } from 'lucide-react'
@@ -6,7 +7,7 @@ import { Button } from '../components/ui/button'
 import { Card, CardContent, CardFooter, CardHeader } from '../components/ui/card'
 import { Avatar, AvatarFallback, AvatarImage } from '../components/ui/avatar'
 import { formatDistanceToNow } from 'date-fns'
-import { Video } from '../types'
+import { Video, Profile } from '../types'
 import { useState } from 'react'
 import { Input } from '../components/ui/input'
 
@@ -17,15 +18,39 @@ function VideoItem({ video }: { video: Video }) {
   const [commentText, setCommentText] = useState('')
 
   const likeMutation = useMutation({
-    mutationFn: async () => {
-      if (!user) return
+    mutationFn: async (video: Video) => {
+      if (!user) throw new Error('User not authenticated')
       if (video.user_has_liked) {
         await supabase.from('likes').delete().eq('video_id', video.id).eq('user_id', user.id)
       } else {
         await supabase.from('likes').insert([{ video_id: video.id, user_id: user.id }])
       }
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['videos'] })
+    onMutate: async (video: Video) => {
+      await queryClient.cancelQueries({ queryKey: ['videos'] })
+      const previousVideos = queryClient.getQueryData<Video[]>(['videos'])
+      queryClient.setQueryData<Video[]>(['videos'], (old) => {
+        if (!old) return old
+        return old.map((item) => {
+          if (item.id !== video.id) return item
+          const liked = !item.user_has_liked
+          return {
+            ...item,
+            user_has_liked: liked,
+            likes_count: (item.likes_count ?? 0) + (liked ? 1 : -1)
+          }
+        })
+      })
+      return { previousVideos }
+    },
+    onError: (_err, _video, context) => {
+      if (context?.previousVideos) {
+        queryClient.setQueryData(['videos'], context.previousVideos)
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['videos'] })
+    }
   })
 
   const commentMutation = useMutation({
@@ -51,13 +76,15 @@ function VideoItem({ video }: { video: Video }) {
 
   return (
     <Card className="mb-6 overflow-hidden">
-      <CardHeader className="flex flex-row items-center space-x-4 p-4 pb-2">
+      <CardHeader className="flex flex-col sm:flex-row sm:items-center items-start space-y-3 sm:space-y-0 sm:space-x-4 p-4 pb-2">
         <Avatar>
           <AvatarImage src={video.profiles?.avatar_url || ''} />
           <AvatarFallback>{video.profiles?.username?.charAt(0).toUpperCase()}</AvatarFallback>
         </Avatar>
-        <div className="flex-1">
-          <p className="text-sm font-semibold">{video.profiles?.username}</p>
+        <div className="flex-1 min-w-0">
+          <Link to={`/profile/${video.user_id}`} className="text-sm font-semibold hover:underline">
+            {video.profiles?.username}
+          </Link>
           <p className="text-xs text-muted-foreground">
             {formatDistanceToNow(new Date(video.created_at), { addSuffix: true })}
           </p>
@@ -74,7 +101,7 @@ function VideoItem({ video }: { video: Video }) {
         </div>
         
         {/* Simple video player / embed. In a real app we'd need to handle different URL types carefully */}
-        <div className="bg-black w-full aspect-video relative flex items-center justify-center">
+        <div className="bg-black w-full aspect-video relative flex items-center justify-center overflow-hidden">
           {video.video_url.includes('youtube') || video.video_url.includes('youtu.be') ? (
             <iframe 
               className="w-full h-full"
@@ -86,7 +113,7 @@ function VideoItem({ video }: { video: Video }) {
               src={video.video_url} 
               poster={video.thumbnail || undefined}
               controls 
-              className="w-full max-h-[600px] object-contain"
+              className="w-full h-full object-cover"
             />
           )}
         </div>
@@ -98,7 +125,7 @@ function VideoItem({ video }: { video: Video }) {
             variant="ghost" 
             size="sm" 
             className={`space-x-1 ${video.user_has_liked ? 'text-secondary' : ''}`}
-            onClick={() => likeMutation.mutate()}
+            onClick={() => likeMutation.mutate(video)}
           >
             <Heart className={`h-5 w-5 ${video.user_has_liked ? 'fill-current' : ''}`} />
             <span>{video.likes_count}</span>
@@ -148,7 +175,24 @@ function VideoItem({ video }: { video: Video }) {
 
 export default function Home() {
   const { user } = useAuth()
+  const [search, setSearch] = useState('')
   
+  const { data: searchResults, isFetching: isSearching } = useQuery({
+    queryKey: ['profile-search', search],
+    queryFn: async () => {
+      const term = search.trim()
+      if (!term) return []
+
+      const filters = `%${term}%`
+      let query = supabase.from('profiles').select('*').or(`username.ilike.${filters},full_name.ilike.${filters}`)
+      if (user?.id) query = query.neq('id', user.id)
+      const { data, error } = await query.limit(20)
+      if (error) throw error
+      return data as Profile[]
+    },
+    enabled: search.trim().length > 0
+  })
+
   const { data: videos, isLoading } = useQuery({
     queryKey: ['videos'],
     queryFn: async () => {
@@ -187,7 +231,49 @@ export default function Home() {
   if (isLoading) return <div className="text-center py-10">Loading feed...</div>
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
+    <div className="max-w-5xl mx-auto space-y-6 px-4 sm:px-6 lg:px-8">
+      <div className="space-y-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search profiles by username or full name"
+            className="flex-1"
+          />
+        </div>
+
+        {search.trim().length > 0 && (
+          <Card className="space-y-3">
+            <div className="flex items-center justify-between px-4 py-3">
+              <h2 className="text-lg font-semibold">Search results</h2>
+              {isSearching && <span className="text-sm text-muted-foreground">Searching...</span>}
+            </div>
+            <CardContent className="space-y-2">
+              {searchResults?.length ? (
+                searchResults.map(profile => (
+                  <Link
+                    key={profile.id}
+                    to={`/profile/${profile.id}`}
+                    className="flex items-center gap-3 rounded-xl border border-border p-3 hover:bg-muted transition"
+                  >
+                    <Avatar className="h-10 w-10">
+                      <AvatarImage src={profile.avatar_url || ''} />
+                      <AvatarFallback>{profile.username.charAt(0).toUpperCase()}</AvatarFallback>
+                    </Avatar>
+                    <div>
+                      <p className="font-medium">{profile.full_name || profile.username}</p>
+                      <p className="text-xs text-muted-foreground">@{profile.username}</p>
+                    </div>
+                  </Link>
+                ))
+              ) : (
+                !isSearching && <div className="text-sm text-muted-foreground px-4 pb-3">No users found.</div>
+              )}
+            </CardContent>
+          </Card>
+        )}
+      </div>
+
       {videos?.length === 0 ? (
         <div className="text-center py-10">No videos yet. Be the first to post!</div>
       ) : (

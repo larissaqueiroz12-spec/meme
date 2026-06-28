@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
@@ -51,8 +52,7 @@ export default function Chat() {
   useEffect(() => {
     if (!user || !selectedUser) return
 
-    // Subscribe to new messages
-    const channel = supabase.channel(`chat_${selectedUser.id}`)
+    const channel = supabase.channel(`chat_${user.id}`)
       .on(
         'postgres_changes',
         {
@@ -62,9 +62,15 @@ export default function Chat() {
           filter: `receiver_id=eq.${user.id}`
         },
         (payload) => {
-          if (payload.new.sender_id === selectedUser.id) {
-            queryClient.setQueryData(['messages', selectedUser.id], (old: Message[] = []) => [...old, payload.new as Message])
-          }
+          const message = payload.new as Message
+          const isRelated = message.sender_id === selectedUser.id || message.receiver_id === selectedUser.id
+          if (!isRelated) return
+
+          queryClient.setQueryData(['messages', selectedUser.id], (old: Message[] = []) => {
+            const existing = old || []
+            if (existing.some(m => m.id === message.id)) return existing
+            return [...existing, message]
+          })
         }
       )
       .subscribe()
@@ -118,17 +124,25 @@ export default function Chat() {
           {users?.map(u => (
             <div 
               key={u.id}
-              onClick={() => setSelectedUser(u)}
-              className={`flex items-center gap-3 p-4 cursor-pointer hover:bg-accent/10 transition-colors border-b last:border-0 ${selectedUser?.id === u.id ? 'bg-accent/10 border-r-4 border-r-accent' : ''}`}
+              className={`flex items-center justify-between gap-3 p-4 cursor-pointer hover:bg-accent/10 transition-colors border-b last:border-0 ${selectedUser?.id === u.id ? 'bg-accent/10 border-r-4 border-r-accent' : ''}`}
             >
-              <Avatar>
-                <AvatarImage src={u.avatar_url || ''} />
-                <AvatarFallback>{u.username.charAt(0).toUpperCase()}</AvatarFallback>
-              </Avatar>
-              <div className="overflow-hidden">
-                <p className="font-medium truncate">{u.full_name || u.username}</p>
-                <p className="text-xs text-muted-foreground truncate">@{u.username}</p>
-              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedUser(u)}
+                className="flex flex-1 items-center gap-3 text-left"
+              >
+                <Avatar>
+                  <AvatarImage src={u.avatar_url || ''} />
+                  <AvatarFallback>{u.username.charAt(0).toUpperCase()}</AvatarFallback>
+                </Avatar>
+                <div className="overflow-hidden">
+                  <p className="font-medium truncate">{u.full_name || u.username}</p>
+                  <p className="text-xs text-muted-foreground truncate">@{u.username}</p>
+                </div>
+              </button>
+              <Link to={`/profile/${u.id}`} className="text-xs text-primary hover:underline whitespace-nowrap">
+                View profile
+              </Link>
             </div>
           ))}
         </CardContent>
